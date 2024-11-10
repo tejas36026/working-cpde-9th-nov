@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Face Segmentation - Image Verification</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/body-pix"></script>
+    <style>
+        .image-canvas {
+            border: 1px solid #ccc;
+            margin: 5px;
+        }
+        .image-grid {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .image-wrapper {
+            margin: 10px;
+        }
+        .keypoints-label {
+            text-align: center;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <img id="sourceImage" src="5.jpg" crossorigin="anonymous" style="display: none;">
+    <div id="mainContainer"></div>
+    <script>
+        let net;
+
+        const BODY_PARTS = {
+    'left_face': { name: 'Left Face', description: 'Left side of the face' },
+    'right_face': { name: 'Right Face', description: 'Right side of the face' },
+    'left_upper_arm_front': { name: 'Left Upper Arm (Front)', description: 'Front of left upper arm' },
+    'left_upper_arm_back': { name: 'Left Upper Arm (Back)', description: 'Back of left upper arm' },
+    'right_upper_arm_front': { name: 'Right Upper Arm (Front)', description: 'Front of right upper arm' },
+    'right_upper_arm_back': { name: 'Right Upper Arm (Back)', description: 'Back of right upper arm' },
+    'left_lower_arm_front': { name: 'Left Lower Arm (Front)', description: 'Front of left forearm' },
+    'left_lower_arm_back': { name: 'Left Lower Arm (Back)', description: 'Back of left forearm' },
+    'right_lower_arm_front': { name: 'Right Lower Arm (Front)', description: 'Front of right forearm' },
+    'right_lower_arm_back': { name: 'Right Lower Arm (Back)', description: 'Back of right forearm' },
+    'left_hand': { name: 'Left Hand', description: 'Left hand' },
+    'right_hand': { name: 'Right Hand', description: 'Right hand' },
+    'torso_front': { name: 'Torso Front', description: 'Front of the torso' },
+    'torso_back': { name: 'Torso Back', description: 'Back of the torso' },
+    'left_upper_leg_front': { name: 'Left Upper Leg (Front)', description: 'Front of left thigh' },
+    'left_upper_leg_back': { name: 'Left Upper Leg (Back)', description: 'Back of left thigh' },
+    'right_upper_leg_front': { name: 'Right Upper Leg (Front)', description: 'Front of right thigh' },
+    'right_upper_leg_back': { name: 'Right Upper Leg (Back)', description: 'Back of right thigh' },
+    'left_lower_leg_front': { name: 'Left Lower Leg (Front)', description: 'Front of left calf' },
+    'left_lower_leg_back': { name: 'Left Lower Leg (Back)', description: 'Back of left calf' },
+    'right_lower_leg_front': { name: 'Right Lower Leg (Front)', description: 'Front of right calf' },
+    'right_lower_leg_back': { name: 'Right Lower Leg (Back)', description: 'Back of right calf' },
+    'left_foot': { name: 'Left Foot', description: 'Left foot' },
+    'right_foot': { name: 'Right Foot', description: 'Right foot' },
+    'left_upper_foot': { name: 'Left Upper Foot', description: 'Upper part of left foot' },
+    'left_lower_foot': { name: 'Left Lower Foot', description: 'Lower part of left foot' },
+    'right_upper_foot': { name: 'Right Upper Foot', description: 'Upper part of right foot' },
+    'right_lower_foot': { name: 'Right Lower Foot', description: 'Lower part of right foot' }
+};
+
+
+        const worker = new Worker('keypoints-worker.js');
+        let collectedPoints = new Map(); 
+
+        function processSegmentVariations(imageData, partName) {
+            return new Promise((resolve) => {
+                worker.postMessage({
+                    imageData: imageData.data,
+                    partName: partName,
+                    width: imageData.width,
+                    height: imageData.height
+                });
+
+                worker.onmessage = function(e) {
+                    const { type, extremePoints, averages, partName } = e.data;
+                    console.log('e.data :>> ', e.data);
+
+                    const variations = [{
+                        data: new Uint8ClampedArray(imageData.data),
+                        extremePoints: extremePoints,
+                        points: {}
+                    }];
+
+                    // Store points for averaging
+                    if (!collectedPoints.has(partName)) {
+                        collectedPoints.set(partName, []);
+                    }
+                    if (extremePoints && extremePoints.top) collectedPoints.get(partName).push(extremePoints.top);
+                    if (extremePoints && extremePoints.bottom) collectedPoints.get(partName).push(extremePoints.bottom);
+
+                    // Initialize points object
+                    Object.keys(BODY_PARTS).forEach(part => {
+                        variations[0].points[part] = {
+                            top: null,
+                            bottom: null
+                        };
+                    });
+
+                    if (extremePoints) {
+                        variations[0].points[partName] = {
+                            top: extremePoints.top,
+                            bottom: extremePoints.bottom
+                        };
+                    }
+
+                    resolve(variations);
+                };
+          
+          
+            });
+        }
+
+     
+        async function processImageWithOverlay() {
+    const img = document.getElementById('sourceImage');
+    const mainContainer = document.getElementById('mainContainer');
+    mainContainer.innerHTML = '';
+
+    const imageGrid = document.createElement('div');
+    imageGrid.className = 'image-grid';
+
+    const segmentation = await net.segmentPersonParts(img);
+
+    // Clear collected points before processing
+    collectedPoints.clear();
+
+    for (let partId = 0; partId < 24; partId++) {
+        const partName = Object.keys(BODY_PARTS)[partId];
+        if (!partName) continue;
+
+        const segmentCanvas = document.createElement('canvas');
+        segmentCanvas.width = img.width;
+        segmentCanvas.height = img.height;
+        const segmentCtx = segmentCanvas.getContext('2d');
+
+        segmentCtx.drawImage(img, 0, 0);
+
+        const imageData = segmentCtx.getImageData(0, 0, img.width, img.height);
+        for (let i = 0; i < segmentation.data.length; i++) {
+            const baseIdx = i * 4;
+            if (segmentation.data[i] !== partId) {
+                imageData.data[baseIdx + 3] = 0;
+            }
+        }
+
+        const variations = await processSegmentVariations(imageData, partName);
+
+        variations.forEach((variation, index) => {
+            if (!variation.data) return;
+
+            const pixelData = new Uint8ClampedArray(variation.data);
+            const variationCanvas = document.createElement('canvas');
+            variationCanvas.width = img.width;
+            variationCanvas.height = img.height;
+            const variationCtx = variationCanvas.getContext('2d');
+
+            const variationImageData = new ImageData(pixelData, img.width, img.height);
+            variationCtx.putImageData(variationImageData, 0, 0);
+
+            // Draw extreme keypoints
+            if (variation.extremePoints) {
+                drawKeypoints(variationCtx, variation.extremePoints, '#00FF00', BODY_PARTS[partName].name);
+            }
+            const wrapper = document.createElement('div');
+            wrapper.className = 'image-wrapper';
+
+            const label = document.createElement('div');
+            label.className = 'keypoints-label';
+            label.textContent = BODY_PARTS[partName].name;
+
+            wrapper.appendChild(variationCanvas);
+            wrapper.appendChild(label);
+            imageGrid.appendChild(wrapper);
+        });
+    }
+
+    mainContainer.appendChild(imageGrid);
+
+    // Calculate averages for specific parts
+    const pointsToProcess = {
+        leftUpperArmFront: collectedPoints.get('left_upper_arm_front') || [],
+        leftUpperArmBack: collectedPoints.get('left_upper_arm_back') || [],
+        leftLowerArmFront: collectedPoints.get('left_lower_arm_front') || [],
+        leftLowerArmBack: collectedPoints.get('left_lower_arm_back') || [],
+        leftHand: collectedPoints.get('left_hand') || [],
+        rightUpperArmFront: collectedPoints.get('right_upper_arm_front') || [],
+        rightUpperArmBack: collectedPoints.get('right_upper_arm_back') || [],
+        rightLowerArmFront: collectedPoints.get('right_lower_arm_front') || [],
+        rightLowerArmBack: collectedPoints.get('right_lower_arm_back') || [],
+        rightHand: collectedPoints.get('right_hand') || [],
+        leftUpperFoot: collectedPoints.get('left_upper_foot') || [],
+        leftLowerFoot: collectedPoints.get('left_lower_foot') || [],
+        rightUpperFoot: collectedPoints.get('right_upper_foot') || [],
+        rightLowerFoot: collectedPoints.get('right_lower_foot') || []
+    };
+
+    worker.postMessage({
+        type: 'calculateAverage',
+        points: pointsToProcess,
+        partNames: {
+            leftUpperArmFront: 'left_upper_arm_front',
+            leftUpperArmBack: 'left_upper_arm_back',
+            leftLowerArmFront: 'left_lower_arm_front',
+            leftLowerArmBack: 'left_lower_arm_back',
+            leftHand: 'left_hand',
+            rightUpperArmFront: 'right_upper_arm_front',
+            rightUpperArmBack: 'right_upper_arm_back',
+            rightLowerArmFront: 'right_lower_arm_front',
+            rightLowerArmBack: 'right_lower_arm_back',
+            rightHand: 'right_hand',
+            leftUpperFoot: 'left_upper_foot',
+            leftLowerFoot: 'left_lower_foot',
+            rightUpperFoot: 'right_upper_foot',
+            rightLowerFoot: 'right_lower_foot'
+        }
+    });
+
+    worker.onmessage = function(e) {
+        const { type, averages, extremePoints, allExtremePoints } = e.data;
+        console.log('Received from worker:', e.data);
+
+        if (type === 'combinedResults' && (averages || extremePoints)) {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+
+            // Draw individual extreme points
+            if (extremePoints) {
+                Object.entries(extremePoints).forEach(([partName, points]) => {
+                    if (!points) return;
+                    const color = partName.includes('front') ? '#0000FF' : '#00FF00';
+
+                    if (points.top) {
+                        ctx.beginPath();
+                        ctx.arc(points.top.x, points.top.y, 3, 0, 2 * Math.PI);
+                        ctx.fillStyle = color;
+                        ctx.fill();
+                        ctx.fillText(`${BODY_PARTS[partName].name} Top`, points.top.x + 10, points.top.y);
+                    }
+
+                    if (points.bottom) {
+                        ctx.beginPath();
+                        ctx.arc(points.bottom.x, points.bottom.y, 3, 0, 2 * Math.PI);
+                        ctx.fillStyle = color;
+                        ctx.fill();
+                        ctx.fillText(`${BODY_PARTS[partName].name} Bottom`, points.bottom.x + 10, points.bottom.y);
+                    }
+                });
+            }
+
+            // Draw combined averages for upper arm
+            if (averages && averages.combined_upper_arm) {
+                const combinedUpperPoints = averages.combined_upper_arm;
+
+                // Draw average top point for upper arm
+                if (combinedUpperPoints.top) {
+                    ctx.beginPath();
+                    ctx.arc(combinedUpperPoints.top.x, combinedUpperPoints.top.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'red';
+                    ctx.fill();
+                    ctx.fillText('Combined Upper Arm Top', combinedUpperPoints.top.x + 10, combinedUpperPoints.top.y);
+                }
+
+                // Draw average bottom point for upper arm
+                if (combinedUpperPoints.bottom) {
+                    ctx.beginPath();
+                    ctx.arc(combinedUpperPoints.bottom.x, combinedUpperPoints.bottom.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'red';
+                    ctx.fill();
+                    ctx.fillText('Combined Upper Arm Bottom', combinedUpperPoints.bottom.x + 10, combinedUpperPoints.bottom.y);
+                }
+
+                // Draw connecting line between upper arm points
+                if (combinedUpperPoints.top && combinedUpperPoints.bottom) {
+                    ctx.beginPath();
+                    ctx.moveTo(combinedUpperPoints.top.x, combinedUpperPoints.top.y);
+                    ctx.lineTo(combinedUpperPoints.bottom.x, combinedUpperPoints.bottom.y);
+                    ctx.strokeStyle = 'red';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+
+            // Draw combined averages for lower arm
+            if (averages && averages.combined_lower_arm) {
+                const combinedLowerPoints = averages.combined_lower_arm;
+
+                // Draw average top point for lower arm
+                if (combinedLowerPoints.top) {
+                    ctx.beginPath();
+                    ctx.arc(combinedLowerPoints.top.x, combinedLowerPoints.top.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'red'; // Different color to distinguish from upper arm
+                    ctx.fill();
+                    ctx.fillText('Combined Lower Arm Top', combinedLowerPoints.top.x + 10, combinedLowerPoints.top.y);
+                }
+
+                // Draw average bottom point for lower arm
+                if (combinedLowerPoints.bottom) {
+                    ctx.beginPath();
+                    ctx.arc(combinedLowerPoints.bottom.x, combinedLowerPoints.bottom.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'red';
+                    ctx.fill();
+                    ctx.fillText('Combined Lower Arm Bottom', combinedLowerPoints.bottom.x + 10, combinedLowerPoints.bottom.y);
+                }
+
+                // Draw connecting line between lower arm points
+                if (combinedLowerPoints.top && combinedLowerPoints.bottom) {
+                    ctx.beginPath();
+                    ctx.moveTo(combinedLowerPoints.top.x, combinedLowerPoints.top.y);
+                    ctx.lineTo(combinedLowerPoints.bottom.x, combinedLowerPoints.bottom.y);
+                    ctx.strokeStyle = 'red';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+
+            // Draw combined averages for right upper arm
+            if (averages && averages.combined_right_upper_arm) {
+                const combinedRightUpperPoints = averages.combined_right_upper_arm;
+
+                // Draw average top point for right upper arm
+                if (combinedRightUpperPoints.top) {
+                    ctx.beginPath();
+                    ctx.arc(combinedRightUpperPoints.top.x, combinedRightUpperPoints.top.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'red'; // Different color to distinguish from left upper arm
+                    ctx.fill();
+                    ctx.fillText('Combined Right Upper Arm Top', combinedRightUpperPoints.top.x + 10, combinedRightUpperPoints.top.y);
+                }
+
+                // Draw average bottom point for right upper arm
+                if (combinedRightUpperPoints.bottom) {
+                    ctx.beginPath();
+                    ctx.arc(combinedRightUpperPoints.bottom.x, combinedRightUpperPoints.bottom.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'red';
+                    ctx.fill();
+                    ctx.fillText('Combined Right Upper Arm Bottom', combinedRightUpperPoints.bottom.x + 10, combinedRightUpperPoints.bottom.y);
+                }
+
+                // Draw connecting line between right upper arm points
+                if (combinedRightUpperPoints.top && combinedRightUpperPoints.bottom) {
+                    ctx.beginPath();
+                    ctx.moveTo(combinedRightUpperPoints.top.x, combinedRightUpperPoints.top.y);
+                    ctx.lineTo(combinedRightUpperPoints.bottom.x, combinedRightUpperPoints.bottom.y);
+                    ctx.strokeStyle = 'red';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+
+            // Draw combined averages for right lower arm
+            if (averages && averages.combined_right_lower_arm) {
+                const combinedRightLowerPoints = averages.combined_right_lower_arm;
+
+                // Draw average top point for right lower arm
+                if (combinedRightLowerPoints.top) {
+                    ctx.beginPath();
+                    ctx.arc(combinedRightLowerPoints.top.x, combinedRightLowerPoints.top.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'red'; // Different color to distinguish from left lower arm
+                    ctx.fill();
+                    ctx.fillText('Combined Right Lower Arm Top', combinedRightLowerPoints.top.x + 10, combinedRightLowerPoints.top.y);
+                }
+
+                // Draw average bottom point for right lower arm
+                if (combinedRightLowerPoints.bottom) {
+                    ctx.beginPath();
+                    ctx.arc(combinedRightLowerPoints.bottom.x, combinedRightLowerPoints.bottom.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'red';
+                    ctx.fill();
+                    ctx.fillText('Combined Right Lower Arm Bottom', combinedRightLowerPoints.bottom.x + 10, combinedRightLowerPoints.bottom.y);
+                }
+
+                // Draw connecting line between right lower arm points
+                if (combinedRightLowerPoints.top && combinedRightLowerPoints.bottom) {
+                    ctx.beginPath();
+                    ctx.moveTo(combinedRightLowerPoints.top.x, combinedRightLowerPoints.top.y);
+                    ctx.lineTo(combinedRightLowerPoints.bottom.x, combinedRightLowerPoints.bottom.y);
+                    ctx.strokeStyle = 'red';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+
+            // Draw combined averages for left upper foot
+            if (averages && averages.combined_left_upper_foot) {
+                const combinedLeftUpperFootPoints = averages.combined_left_upper_foot;
+
+                // Draw average top point for left upper foot
+                if (combinedLeftUpperFootPoints.top) {
+                    ctx.beginPath();
+                    ctx.arc(combinedLeftUpperFootPoints.top.x, combinedLeftUpperFootPoints.top.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'blue';
+                    ctx.fill();
+                    ctx.fillText('Combined Left Upper Foot Top', combinedLeftUpperFootPoints.top.x + 10, combinedLeftUpperFootPoints.top.y);
+                }
+
+                // Draw average bottom point for left upper foot
+                if (combinedLeftUpperFootPoints.bottom) {
+                    ctx.beginPath();
+                    ctx.arc(combinedLeftUpperFootPoints.bottom.x, combinedLeftUpperFootPoints.bottom.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'blue';
+                    ctx.fill();
+                    ctx.fillText('Combined Left Upper Foot Bottom', combinedLeftUpperFootPoints.bottom.x + 10, combinedLeftUpperFootPoints.bottom.y);
+                }
+
+                // Draw connecting line between left upper foot points
+                if (combinedLeftUpperFootPoints.top && combinedLeftUpperFootPoints.bottom) {
+                    ctx.beginPath();
+                    ctx.moveTo(combinedLeftUpperFootPoints.top.x, combinedLeftUpperFootPoints.top.y);
+                    ctx.lineTo(combinedLeftUpperFootPoints.bottom.x, combinedLeftUpperFootPoints.bottom.y);
+                    ctx.strokeStyle = 'blue';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+
+            // Draw combined averages for left lower foot
+            if (averages && averages.combined_left_lower_foot) {
+                const combinedLeftLowerFootPoints = averages.combined_left_lower_foot;
+
+                // Draw average top point for left lower foot
+                if (combinedLeftLowerFootPoints.top) {
+                    ctx.beginPath();
+                    ctx.arc(combinedLeftLowerFootPoints.top.x, combinedLeftLowerFootPoints.top.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'blue';
+                    ctx.fill();
+                    ctx.fillText('Combined Left Lower Foot Top', combinedLeftLowerFootPoints.top.x + 10, combinedLeftLowerFootPoints.top.y);
+                }
+
+                // Draw average bottom point for left lower foot
+                if (combinedLeftLowerFootPoints.bottom) {
+                    ctx.beginPath();
+                    ctx.arc(combinedLeftLowerFootPoints.bottom.x, combinedLeftLowerFootPoints.bottom.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'blue';
+                    ctx.fill();
+                    ctx.fillText('Combined Left Lower Foot Bottom', combinedLeftLowerFootPoints.bottom.x + 10, combinedLeftLowerFootPoints.bottom.y);
+                }
+
+                // Draw connecting line between left lower foot points
+                if (combinedLeftLowerFootPoints.top && combinedLeftLowerFootPoints.bottom) {
+                    ctx.beginPath();
+                    ctx.moveTo(combinedLeftLowerFootPoints.top.x, combinedLeftLowerFootPoints.top.y);
+                    ctx.lineTo(combinedLeftLowerFootPoints.bottom.x, combinedLeftLowerFootPoints.bottom.y);
+                    ctx.strokeStyle = 'blue';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+
+            // Draw combined averages for right upper foot
+            if (averages && averages.combined_right_upper_foot) {
+                const combinedRightUpperFootPoints = averages.combined_right_upper_foot;
+
+                // Draw average top point for right upper foot
+                if (combinedRightUpperFootPoints.top) {
+                    ctx.beginPath();
+                    ctx.arc(combinedRightUpperFootPoints.top.x, combinedRightUpperFootPoints.top.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'blue';
+                    ctx.fill();
+                    ctx.fillText('Combined Right Upper Foot Top', combinedRightUpperFootPoints.top.x + 10, combinedRightUpperFootPoints.top.y);
+                }
+
+                // Draw average bottom point for right upper foot
+                if (combinedRightUpperFootPoints.bottom) {
+                    ctx.beginPath();
+                    ctx.arc(combinedRightUpperFootPoints.bottom.x, combinedRightUpperFootPoints.bottom.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'blue';
+                    ctx.fill();
+                    ctx.fillText('Combined Right Upper Foot Bottom', combinedRightUpperFootPoints.bottom.x + 10, combinedRightUpperFootPoints.bottom.y);
+                }
+
+                // Draw connecting line between right upper foot points
+                if (combinedRightUpperFootPoints.top && combinedRightUpperFootPoints.bottom) {
+                    ctx.beginPath();
+                    ctx.moveTo(combinedRightUpperFootPoints.top.x, combinedRightUpperFootPoints.top.y);
+                    ctx.lineTo(combinedRightUpperFootPoints.bottom.x, combinedRightUpperFootPoints.bottom.y);
+                    ctx.strokeStyle = 'blue';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+
+            // Draw combined averages for right lower foot
+            if (averages && averages.combined_right_lower_foot) {
+                const combinedRightLowerFootPoints = averages.combined_right_lower_foot;
+
+                // Draw average top point for right lower foot
+                if (combinedRightLowerFootPoints.top) {
+                    ctx.beginPath();
+                    ctx.arc(combinedRightLowerFootPoints.top.x, combinedRightLowerFootPoints.top.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'blue';
+                    ctx.fill();
+                    ctx.fillText('Combined Right Lower Foot Top', combinedRightLowerFootPoints.top.x + 10, combinedRightLowerFootPoints.top.y);
+                }
+
+                // Draw average bottom point for right lower foot
+                if (combinedRightLowerFootPoints.bottom) {
+                    ctx.beginPath();
+                    ctx.arc(combinedRightLowerFootPoints.bottom.x, combinedRightLowerFootPoints.bottom.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'blue';
+                    ctx.fill();
+                    ctx.fillText('Combined Right Lower Foot Bottom', combinedRightLowerFootPoints.bottom.x + 10, combinedRightLowerFootPoints.bottom.y);
+                }
+
+                // Draw connecting line between right lower foot points
+                if (combinedRightLowerFootPoints.top && combinedRightLowerFootPoints.bottom) {
+                    ctx.beginPath();
+                    ctx.moveTo(combinedRightLowerFootPoints.top.x, combinedRightLowerFootPoints.top.y);
+                    ctx.lineTo(combinedRightLowerFootPoints.bottom.x, combinedRightLowerFootPoints.bottom.y);
+                    ctx.strokeStyle = 'blue';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'image-wrapper';
+
+            const labelDiv = document.createElement('div');
+            labelDiv.className = 'keypoints-label';
+            labelDiv.textContent = 'Combined Points Visualization';
+
+            wrapper.appendChild(canvas);
+            wrapper.appendChild(labelDiv);
+            mainContainer.appendChild(wrapper);
+        }
+    };
+}
+
+
+        async function loadModels() {
+            try {
+                net = await bodyPix.load({
+                    architecture: 'MobileNetV1',
+                    outputStride: 16,
+                    multiplier: 0.75,
+                    quantBytes: 2
+                });
+            } catch (error) {
+                throw error;
+            }
+        }
+
+        function drawKeypoints(ctx, points, color, label) {
+    // Draw top point
+    ctx.beginPath();
+    ctx.arc(points.top.x, points.top.y, 3, 0, 2 * Math.PI);
+    ctx.fillStyle = color;
+    ctx.fill();
+
+    // Draw bottom point
+    ctx.beginPath();
+    ctx.arc(points.bottom.x, points.bottom.y, 3, 0, 2 * Math.PI);
+    ctx.fillStyle = color;
+    ctx.fill();
+
+    // Draw connecting line
+    ctx.beginPath();
+    ctx.moveTo(points.top.x, points.top.y);
+    ctx.lineTo(points.bottom.x, points.bottom.y);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Draw label
+    ctx.font = '12px Arial';
+    ctx.fillText(label, points.top.x, points.top.y - 10);
+}
+
+        document.getElementById('sourceImage').onload = async function() {
+            await loadModels();
+            await processImageWithOverlay();
+        };
+    </script>
+</body>
+</html>
